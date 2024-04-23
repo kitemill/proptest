@@ -1,7 +1,7 @@
 #
 # This script will download data from the three load sensors on the prop test
 # rig and output them to a CSV file. It will also interface the multi hole
-# probe
+# probe. And also note the RPM coming from VESC with Id 101, 102, 103, 104, 105
 #
 # Run the script with
 # $ elixir proptest_logger.exs
@@ -17,11 +17,13 @@ Mix.install(
 )
 
 # This agent holds the data from the probe so it can be accessed asyncronically
-defmodule ProbeAgent do
+defmodule ProbeAndVESCAgent do
   use Agent
 
+  @vesc_status_1 9
+
   def start_link() do
-    initial_value = %{p1: 0.0, p2: 0.0, p3: 0.0, p4: 0.0, p5: 0.0, p6: 0.0, p7: 0.0, p8: 0.0, temperature: 0.0}
+    initial_value = %{p1: 0.0, p2: 0.0, p3: 0.0, p4: 0.0, p5: 0.0, p6: 0.0, p7: 0.0, p8: 0.0, temperature: 0.0, erpm_101: 0, erpm_102: 0, erpm_103: 0, erpm_104: 0}
     Agent.start_link(fn -> initial_value end, name: __MODULE__)
   end
 
@@ -43,6 +45,7 @@ defmodule ProbeAgent do
 
 
   defp handle_can_packet_helper(packet, state) do
+    # handle multi hole probe packets
     if <<0x180::integer-big-16>> = packet.identifier do
       case packet.data do
         <<0, p1::big-16, p2::big-16, p3::big-16, _::binary>> ->
@@ -55,7 +58,16 @@ defmodule ProbeAgent do
           state
       end
     else
-        state
+        if <<@vesc_status_1, vesc_id>> = packet.identifier when vesc_id in [101, 102, 103, 104] do
+          case packet.data do
+            <<erpm::integer-big-32, _::binary>> ->
+              Map.put(state, String.to_atom("erpm_#{vesc_id}"), erpm)
+            _ ->
+              state
+          end
+        else
+          state
+        end
     end
   end
 end
@@ -63,19 +75,19 @@ end
 
 defmodule PropTest do
   def run() do
-    csv_header = "epoch,force_x,force_y,force_z,p1,p2,p3,p4,p5,p6,p7,p8,temperature\n"
+    csv_header = "epoch,force_x,force_y,force_z,p1,p2,p3,p4,p5,p6,p7,p8,temperature,erpm_101,erpm_102,erpm_103,erpm_104\n"
 
     #
     # CAN stuff to receive from the multi hole probe
     # We will have one process to receive packets, and one agent process to own the
     # data from the MHP
     #
-    {:ok, _mhp_agent} = ProbeAgent.start_link()
+    {:ok, _mhp_agent} = ProbeAndVESCAgent.start_link()
 
     _can_listener_pid = Task.async(fn ->
       Cannes.Dumper.start("vcan0")
       |> Cannes.Dumper.get_formatted_stream
-      |> Stream.each(fn packet -> ProbeAgent.handle_can_packet(packet) end)
+      |> Stream.each(fn packet -> ProbeAndVESCAgent.handle_can_packet(packet) end)
       |> Stream.run
     end)
 
@@ -129,7 +141,7 @@ defmodule PropTest do
         DateTime.now!("Etc/UTC")
         |> DateTime.to_unix(:millisecond)
 
-      pressures = ProbeAgent.get()
+      pressures = ProbeAndVESCAgent.get()
       pressure_temp_list = [
         pressures.p1,
         pressures.p2,
@@ -139,7 +151,11 @@ defmodule PropTest do
         pressures.p6,
         pressures.p7,
         pressures.p8,
-        pressures.temperature
+        pressures.temperature,
+        pressures.erpm_101,
+        pressures.erpm_102,
+        pressures.erpm_103,
+        pressures.erpm_104,
       ]
 
       tmp = 
