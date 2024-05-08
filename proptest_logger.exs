@@ -57,17 +57,17 @@ defmodule ProbeAndVESCAgent do
         _ ->
           state
       end
-    else
-        if <<@vesc_status_1, vesc_id>> = packet.identifier when vesc_id in [101, 102, 103, 104] do
-          case packet.data do
-            <<erpm::integer-big-32, _::binary>> ->
-              Map.put(state, String.to_atom("erpm_#{vesc_id}"), erpm)
-            _ ->
-              state
-          end
-        else
-          state
-        end
+    # else
+        # if <<@vesc_status_1, vesc_id>> = packet.identifier when vesc_id in [101, 102, 103, 104] do
+          # case packet.data do
+            # <<erpm::integer-big-32, _::binary>> ->
+              # Map.put(state, String.to_atom("erpm_#{vesc_id}"), erpm)
+            # _ ->
+              # state
+          # end
+        # else
+          # state
+        # end
     end
   end
 end
@@ -85,7 +85,7 @@ defmodule PropTest do
     {:ok, _mhp_agent} = ProbeAndVESCAgent.start_link()
 
     _can_listener_pid = Task.async(fn ->
-      Cannes.Dumper.start("vcan0")
+      Cannes.Dumper.start("can0")
       |> Cannes.Dumper.get_formatted_stream
       |> Stream.each(fn packet -> ProbeAndVESCAgent.handle_can_packet(packet) end)
       |> Stream.run
