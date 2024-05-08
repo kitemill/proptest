@@ -72,7 +72,7 @@ defmodule PropTest do
     {:ok, _mhp_agent} = ProbeAndVESCAgent.start_link()
 
     _can_listener_pid = Task.async(fn ->
-      Cannes.Dumper.start("vcan0")
+      Cannes.Dumper.start("can0")
       |> Cannes.Dumper.get_formatted_stream
       |> Stream.each(fn packet -> ProbeAndVESCAgent.handle_can_packet(packet) end)
       |> Stream.run
