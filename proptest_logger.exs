@@ -11,7 +11,7 @@ Mix.install(
   [
     {:modbus, "~> 0.4.0"},
     # {:cannes, "~> 0.0.5"},
-    {:cannes, github: "tallakt/cannes", branch: "master"},
+    {:cannes, github: "tallakt/cannes", branch: "master"}
   ],
   config: [porcelain: [driver: Porcelain.Driver.Basic]]
 )
@@ -23,59 +23,97 @@ defmodule ProbeAndVESCAgent do
   @vesc_status_1 9
 
   def start_link() do
-    initial_value = %{p1: 0.0, p2: 0.0, p3: 0.0, p4: 0.0, p5: 0.0, p6: 0.0, p7: 0.0, p8: 0.0, temperature: 0.0, erpm_101: 0, erpm_102: 0, erpm_103: 0, erpm_104: 0}
+    initial_value = %{
+      p1: 0.0,
+      p2: 0.0,
+      p3: 0.0,
+      p4: 0.0,
+      p5: 0.0,
+      p6: 0.0,
+      p7: 0.0,
+      p8: 0.0,
+      temperature: 0.0,
+      erpm_101: -99,
+      erpm_102: -99,
+      erpm_103: -99,
+      erpm_104: -99
+    }
+
     Agent.start_link(fn -> initial_value end, name: __MODULE__)
   end
-
 
   def get() do
     Agent.get(__MODULE__, & &1)
   end
 
-
   def handle_can_packet(packet) do
-    Agent.update(__MODULE__, fn state -> handle_can_packet_helper(packet, state) end )
+    Agent.update(__MODULE__, fn state -> handle_can_packet_helper(packet, state) end)
   end
 
-
   defp evoscann_raw_to_mbar(x) do
-    <<tmp::signed-16>> = <<(x - 32768)::integer-16>>
+    <<tmp::signed-16>> = <<x - 32768::integer-16>>
     tmp / 320.0
   end
 
+  defp handle_can_mhp_helper(packet, state) do
+    case packet.data do
+      <<0, p1::big-16, p2::big-16, p3::big-16, _::binary>> ->
+        %{
+          state
+          | p1: evoscann_raw_to_mbar(p1),
+            p2: evoscann_raw_to_mbar(p2),
+            p3: evoscann_raw_to_mbar(p3)
+        }
+
+      <<1, p4::big-16, p5::big-16, p6::big-16, t::signed>> ->
+        %{
+          state
+          | p4: evoscann_raw_to_mbar(p4),
+            p5: evoscann_raw_to_mbar(p5),
+            p6: evoscann_raw_to_mbar(p6),
+            temperature: t
+        }
+
+      <<2, p7::big-16, p8::big-16, _::binary>> ->
+        %{state | p7: evoscann_raw_to_mbar(p7), p8: evoscann_raw_to_mbar(p8)}
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_can_vesc_helper(packet, vesc_id, state) when vesc_id in [101, 102, 103, 104] do
+    case packet.data do
+      <<erpm::integer-big-32-signed, _::binary>> ->
+        Map.put(state, String.to_atom("erpm_#{vesc_id}"), erpm)
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_can_vesc_helper(_packet, _vesc_id, state) do
+    state
+  end
 
   defp handle_can_packet_helper(packet, state) do
-    # handle multi hole probe packets
-    if <<0x180::integer-big-16>> = packet.identifier do
-      case packet.data do
-        <<0, p1::big-16, p2::big-16, p3::big-16, _::binary>> ->
-          %{state | p1: evoscann_raw_to_mbar(p1), p2: evoscann_raw_to_mbar(p2), p3: evoscann_raw_to_mbar(p3)}
-        <<1, p4::big-16, p5::big-16, p6::big-16, t::signed>> ->
-          %{state | p4: evoscann_raw_to_mbar(p4), p5: evoscann_raw_to_mbar(p5), p6: evoscann_raw_to_mbar(p6), temperature: t}
-        <<2, p7::big-16, p8::big-16, _::binary>> ->
-          %{state | p7: evoscann_raw_to_mbar(p7), p8: evoscann_raw_to_mbar(p8)}
-        _ ->
-          state
-      end
-    # else
-        # if <<@vesc_status_1, vesc_id>> = packet.identifier when vesc_id in [101, 102, 103, 104] do
-          # case packet.data do
-            # <<erpm::integer-big-32, _::binary>> ->
-              # Map.put(state, String.to_atom("erpm_#{vesc_id}"), erpm)
-            # _ ->
-              # state
-          # end
-        # else
-          # state
-        # end
+    case packet.identifier do
+      <<0x180::integer-big-16>> ->
+        handle_can_mhp_helper(packet, state)
+
+      <<_, _, @vesc_status_1, vesc_id>> ->
+        handle_can_vesc_helper(packet, vesc_id, state)
+
+      _ ->
+        state
     end
   end
 end
 
-
 defmodule PropTest do
   def run() do
-    csv_header = "epoch,force_x,force_y,force_z,p1,p2,p3,p4,p5,p6,p7,p8,temperature,erpm_101,erpm_102,erpm_103,erpm_104\n"
+    csv_header =
+      "epoch,force_x,force_y,force_z,p1,p2,p3,p4,p5,p6,p7,p8,temperature,erpm_101,erpm_102,erpm_103,erpm_104\n"
 
     #
     # CAN stuff to receive from the multi hole probe
@@ -84,12 +122,13 @@ defmodule PropTest do
     #
     {:ok, _mhp_agent} = ProbeAndVESCAgent.start_link()
 
-    _can_listener_pid = Task.async(fn ->
-      Cannes.Dumper.start("can0")
-      |> Cannes.Dumper.get_formatted_stream
-      |> Stream.each(fn packet -> ProbeAndVESCAgent.handle_can_packet(packet) end)
-      |> Stream.run
-    end)
+    _can_listener_pid =
+      Task.async(fn ->
+        Cannes.Dumper.start("can0")
+        |> Cannes.Dumper.get_formatted_stream()
+        |> Stream.each(fn packet -> ProbeAndVESCAgent.handle_can_packet(packet) end)
+        |> Stream.run()
+      end)
 
     # To test the reception of traffic, use:
     #  cansend vcan0 180#01.80.00.80.00.80.00.14
@@ -108,8 +147,6 @@ defmodule PropTest do
     #     :ok
     # end
 
-
-
     # 
     # Modbus stuff
     #
@@ -117,23 +154,32 @@ defmodule PropTest do
     serial_gateway_ip = {192, 168, 0, 239}
     serial_gateway_port = 502
 
-    rtu_address_x = 1 # module default, 9600 baud rate
+    # module default, 9600 baud rate
+    rtu_address_x = 1
     rtu_address_y = 2
     rtu_address_z = 3
     modbus_address_weight_holding_registers = 0x0000
 
-    polling_interval = 250 # ms
+    # ms
+    polling_interval = 250
 
     {:ok, master} = Modbus.Master.start_link(ip: serial_gateway_ip, port: serial_gateway_port)
 
     polling_fun = fn ->
-      read_modbus_regs = fn (node_address) ->
-        {:ok , regs} = Modbus.Master.exec(master, {:rhr, node_address, modbus_address_weight_holding_registers, 2})
+      read_modbus_regs = fn node_address ->
+        {:ok, regs} =
+          Modbus.Master.exec(
+            master,
+            {:rhr, node_address, modbus_address_weight_holding_registers, 2}
+          )
+
         regs
       end
 
       regs_to_val = fn [r0, r1] ->
-        <<result::integer-big-signed-size(32)>> = <<r0::integer-big-unsigned-size(16), r1::integer-big-unsigned-size(16)>>
+        <<result::integer-big-signed-size(32)>> =
+          <<r0::integer-big-unsigned-size(16), r1::integer-big-unsigned-size(16)>>
+
         result
       end
 
@@ -142,6 +188,7 @@ defmodule PropTest do
         |> DateTime.to_unix(:millisecond)
 
       pressures = ProbeAndVESCAgent.get()
+
       pressure_temp_list = [
         pressures.p1,
         pressures.p2,
@@ -155,21 +202,22 @@ defmodule PropTest do
         pressures.erpm_101,
         pressures.erpm_102,
         pressures.erpm_103,
-        pressures.erpm_104,
+        pressures.erpm_104
       ]
 
-      tmp = 
+      tmp =
         [rtu_address_x, rtu_address_y, rtu_address_z]
         |> Enum.map(read_modbus_regs)
         |> Enum.map(regs_to_val)
         |> Enum.concat(pressure_temp_list)
         |> Enum.join(",")
+
       "#{timestamp},#{tmp}\n"
     end
 
-    timestamp = 
+    timestamp =
       DateTime.now!("Etc/UTC")
-      |> DateTime.to_iso8601
+      |> DateTime.to_iso8601()
       |> String.replace(~r/[:.-]/, "_")
 
     add_csv_header_to_stream = fn enum -> Stream.concat([csv_header], enum) end
@@ -179,10 +227,9 @@ defmodule PropTest do
     |> add_csv_header_to_stream.()
     |> Stream.into(File.stream!("proptest_logger_#{timestamp}.csv"))
     |> Stream.run()
-    # this will block
 
+    # this will block
   end
 end
-
 
 PropTest.run()
