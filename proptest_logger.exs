@@ -3,7 +3,33 @@
 # rig and output them to a CSV file. It will also interface the multi hole
 # probe. And also note the RPM coming from VESC with Id 101, 102, 103, 104, 105
 #
+# To get the CANable USB adapter to connect to CAN on 250 kbps (for VESC and
+# multi hole probe) you need to issue the following commands
+#
+# $ sudo ip link set can0 up
+# $ sudo slcand -o -c -s5 /dev/ttyACM0 can0
+# $ sudo ip link set can0 up
+#
+# Then to see if you are online, look at the traffic by issuing (press Ctrl+C
+# to quit)
+#
+# $ candump can0
+#
+# To connect to the load cell amplifiers, you need to connect to a local
+# network on the same subnet as the modbus Ethernet gateway. This could be done
+# in the control panel in Linux using eg.
+#
+# IP address 192.168.0.238
+# Netmask 255.255.255.0
+#
+# To see if you are connected, run
+#
+# $ ping 192.168.0.329
+# $ modbus read -s 1 192.168.0.239 %MW0 2
+#
+#
 # Run the script with
+#
 # $ elixir proptest_logger.exs
 #
 
