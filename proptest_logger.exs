@@ -6,7 +6,7 @@
 # To get the CANable USB adapter to connect to CAN on 250 kbps (for VESC and
 # multi hole probe) you need to issue the following commands
 #
-# $ sudo ip link set can0 up
+# $ sudo ip link set can0 down
 # $ sudo slcand -o -c -s5 /dev/ttyACM0 can0
 # $ sudo ip link set can0 up
 #
@@ -30,8 +30,35 @@
 #
 # Run the script with
 #
+# $ cd
+# $ cd proptest
 # $ elixir proptest_logger.exs
 #
+# Press Ctrl+C twice to exit the logger.
+#
+# For every run, a new .csv file is generated in the proptest folder.
+#
+# ! Pro tip: type `nautilus &` to open the file explorer
+#
+# We are logging ERPM for the VESCs. The ERPM must be divided by half the
+# number of poles on the motor itself to get the actual RPM on the shaft. For
+# both the Hacker and KDE motors, this number is (28 / 2). So eg. 14000 ERPM
+# means 1000 RPM on the shaft. The maximum speed of the motors is around 5000
+# RPM [70_000 ERPM].
+#
+# The Modbus TCP gateway is set up with:
+# - Address 192.168.0.239
+# - Port 502
+# - Mode RTU to TCP
+# - Baud rate 9600
+#
+#
+# The load cell amplifiers are set up with (manual in teams under components)
+# - F2.CAL/Data/range 500
+# - F2.CAL/Data/Sensitivity <according to calibration sheet>
+# - F1.SEt/SerP/Ad 1/2/3 for X/Y/Z respectively
+#
+# Other settings default values
 
 Mix.install(
   [
@@ -209,8 +236,8 @@ defmodule PropTest do
     serial_gateway_port = 502
 
     # module default, 9600 baud rate
-    rtu_address_x = 1
-    rtu_address_y = 2
+    rtu_address_x = 3
+    rtu_address_y = 3
     rtu_address_z = 3
     modbus_address_weight_holding_registers = 0x0000
 
