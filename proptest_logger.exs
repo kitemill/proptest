@@ -47,6 +47,7 @@ defmodule ProbeAndVESCAgent do
   use Agent
 
   @vesc_status_1 9
+  @vesc_status_4 16
 
   def start_link() do
     initial_value = %{
@@ -62,7 +63,15 @@ defmodule ProbeAndVESCAgent do
       erpm_101: -99,
       erpm_102: -99,
       erpm_103: -99,
-      erpm_104: -99
+      erpm_104: -99,
+      current_in_101: -99,
+      current_in_102: -99,
+      current_in_103: -99,
+      current_in_104: -99,
+      motor_current_101: -99,
+      motor_current_102: -99,
+      motor_current_103: -99,
+      motor_current_104: -99,
     }
 
     Agent.start_link(fn -> initial_value end, name: __MODULE__)
@@ -108,17 +117,33 @@ defmodule ProbeAndVESCAgent do
     end
   end
 
-  defp handle_can_vesc_helper(packet, vesc_id, state) when vesc_id in [101, 102, 103, 104] do
+  defp handle_can_vesc_helper_status_1(packet, vesc_id, state) when vesc_id in [101, 102, 103, 104] do
     case packet.data do
-      <<erpm::integer-big-32-signed, _::binary>> ->
-        Map.put(state, String.to_atom("erpm_#{vesc_id}"), erpm)
+      <<erpm::integer-big-32-signed, motor_current::integer-big-16-signed, _::binary>> ->
+        state
+        |> Map.put(String.to_atom("erpm_#{vesc_id}"), erpm)
+        |> Map.put(String.to_atom("motor_current_#{vesc_id}"), motor_current * 0.1)
 
       _ ->
         state
     end
   end
 
-  defp handle_can_vesc_helper(_packet, _vesc_id, state) do
+  defp handle_can_vesc_helper_status_1(_packet, _vesc_id, state) do
+    state
+  end
+
+  defp handle_can_vesc_helper_status_4(packet, vesc_id, state) when vesc_id in [101, 102, 103, 104] do
+    case packet.data do
+      <<_::integer-32, current::integer-big-16-signed, _::binary>> ->
+        Map.put(state, String.to_atom("current_in_#{vesc_id}"), current * 0.1)
+
+      _ ->
+        state
+    end
+  end
+
+  defp handle_can_vesc_helper_status_4(_packet, _vesc_id, state) do
     state
   end
 
@@ -128,7 +153,10 @@ defmodule ProbeAndVESCAgent do
         handle_can_mhp_helper(packet, state)
 
       <<_, _, @vesc_status_1, vesc_id>> ->
-        handle_can_vesc_helper(packet, vesc_id, state)
+        handle_can_vesc_helper_status_1(packet, vesc_id, state)
+
+      <<_, _, @vesc_status_4, vesc_id>> ->
+        handle_can_vesc_helper_status_4(packet, vesc_id, state)
 
       _ ->
         state
@@ -139,7 +167,7 @@ end
 defmodule PropTest do
   def run() do
     csv_header =
-      "epoch,force_x,force_y,force_z,p1,p2,p3,p4,p5,p6,p7,p8,temperature,erpm_101,erpm_102,erpm_103,erpm_104\n"
+      "epoch,force_x,force_y,force_z,p1,p2,p3,p4,p5,p6,p7,p8,temperature,erpm_101,erpm_102,erpm_103,erpm_104,current_in_101,current_in_102,current_in_103,current_in_104,motor_current_101,motor_current_102,motor_current_103,motor_current_104\n"
 
     #
     # CAN stuff to receive from the multi hole probe
@@ -228,7 +256,15 @@ defmodule PropTest do
         pressures.erpm_101,
         pressures.erpm_102,
         pressures.erpm_103,
-        pressures.erpm_104
+        pressures.erpm_104,
+        pressures.current_in_101,
+        pressures.current_in_102,
+        pressures.current_in_103,
+        pressures.current_in_104,
+        pressures.motor_current_101,
+        pressures.motor_current_102,
+        pressures.motor_current_103,
+        pressures.motor_current_104,
       ]
 
       tmp =
