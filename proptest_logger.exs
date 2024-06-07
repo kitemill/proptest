@@ -21,7 +21,7 @@ defmodule ProbeAndVESCAgent do
   use Agent
 
   def start_link() do
-    initial_value = %{p1: 0.0, p2: 0.0, p3: 0.0, p4: 0.0, p5: 0.0, p6: 0.0, p7: 0.0, p8: 0.0, temperature: 0.0, erpm_101: 0, erpm_102: 0, erpm_103: 0, erpm_104: 0}
+    initial_value = %{p1: 0.0, p2: 0.0, p3: 0.0, p4: 0.0, p5: 0.0, p6: 0.0, p7: 0.0, p8: 0.0, p11: 0.0, p12: 0.0, p13: 0.0, p14: 0.0, p15: 0.0, p16: 0.0, p17: 0.0, p18: 0.0, temperature: 0.0}
     Agent.start_link(fn -> initial_value end, name: __MODULE__)
   end
 
@@ -44,17 +44,33 @@ defmodule ProbeAndVESCAgent do
 
   defp handle_can_packet_helper(packet, state) do
     # handle multi hole probe packets
-    if <<0x180::integer-big-16>> = packet.identifier do
-      case packet.data do
-        <<0, p1::big-16, p2::big-16, p3::big-16, _::binary>> ->
-          %{state | p1: evoscann_raw_to_mbar(p1), p2: evoscann_raw_to_mbar(p2), p3: evoscann_raw_to_mbar(p3)}
-        <<1, p4::big-16, p5::big-16, p6::big-16, t::signed>> ->
-          %{state | p4: evoscann_raw_to_mbar(p4), p5: evoscann_raw_to_mbar(p5), p6: evoscann_raw_to_mbar(p6), temperature: t}
-        <<2, p7::big-16, p8::big-16, _::binary>> ->
-          %{state | p7: evoscann_raw_to_mbar(p7), p8: evoscann_raw_to_mbar(p8)}
-        _ ->
-          state
-      end
+    case packet.identifier do
+      <<0x180::integer-big-16>> ->
+        case packet.data do # 3d print
+          <<0, p1::big-16, p2::big-16, p3::big-16, _::binary>> ->
+            %{state | p1: evoscann_raw_to_mbar(p1), p2: evoscann_raw_to_mbar(p2), p3: evoscann_raw_to_mbar(p3)}
+          <<1, p4::big-16, p5::big-16, p6::big-16, t::signed>> ->
+            %{state | p4: evoscann_raw_to_mbar(p4), p5: evoscann_raw_to_mbar(p5), p6: evoscann_raw_to_mbar(p6), temperature: t}
+          <<2, p7::big-16, p8::big-16, _::binary>> ->
+            %{state | p7: evoscann_raw_to_mbar(p7), p8: evoscann_raw_to_mbar(p8)}
+          _ ->
+            state
+        end
+
+      <<0x190::integer-big-16>> ->
+        case packet.data do
+          <<0, p11::big-16, p12::big-16, p13::big-16, _::binary>> ->
+            %{state | p11: evoscann_raw_to_mbar(p11), p2: evoscann_raw_to_mbar(p12), p3: evoscann_raw_to_mbar(p13)}
+          <<1, p14::big-16, p15::big-16, p16::big-16, t::signed>> ->
+            %{state | p14: evoscann_raw_to_mbar(p14), p15: evoscann_raw_to_mbar(p15), p16: evoscann_raw_to_mbar(p16)}
+          <<2, p17::big-16, p18::big-16, _::binary>> ->
+            %{state | p17: evoscann_raw_to_mbar(p17), p18: evoscann_raw_to_mbar(p18)}
+          _ ->
+            state
+        end
+
+      _ ->
+        state
     end
   end
 end
@@ -62,7 +78,7 @@ end
 
 defmodule PropTest do
   def run() do
-    csv_header = "epoch,servo1,servo2,p1,p2,p3,p4,p5,p6,p7,p8,temperature\n"
+    csv_header = "epoch,servo1,servo2,p1,p2,p3,p4,p5,p6,p7,p8,temperature,p11,p12,p13,p14,p15,p16,p17,p18\n"
 
     #
     # CAN stuff to receive from the multi hole probe
@@ -106,7 +122,7 @@ defmodule PropTest do
     {:ok, serial_pid} = Circuits.UART.start_link()
     Circuits.UART.open(serial_pid, "ttyUSB0", speed: 115200, active: false)
 
-    polling_interval = 1000 # ms
+    polling_interval = 50 # ms
 
 
     change_setpoints_fun = fn ->
@@ -118,9 +134,6 @@ defmodule PropTest do
       servo2_sp = round(1500 + 400.0 * :math.sin(t / 1000.0 / 91.0 * 3.141 * 2))
 
       Circuits.UART.write(serial_pid,<<0xff, servo1_sp::big-16, servo2_sp::big-16>>)
-      # Circuits.UART.write(serial_pid,<<0, 0xdead::big-16, 0xbeef::big-16>>)
-      # Circuits.UART.write(serial_pid,<<0, 0x1122::big-16, 0x3344::big-16>>)
-      # Circuits.UART.write(serial_pid,<<99, 98>>)
       IO.puts("Setting PWM values #{servo1_sp} and #{servo2_sp}")
 
       :timer.sleep(round(polling_interval / 2))
@@ -133,7 +146,7 @@ defmodule PropTest do
       row = [
         servo1_sp,
         servo2_sp,
-        pressures.p1,
+        pressures.p1, # 3d print
         pressures.p2,
         pressures.p3,
         pressures.p4,
@@ -142,6 +155,14 @@ defmodule PropTest do
         pressures.p7,
         pressures.p8,
         pressures.temperature,
+        pressures.p11, # evolution m
+        pressures.p12,
+        pressures.p13,
+        pressures.p14,
+        pressures.p15,
+        pressures.p16,
+        pressures.p17,
+        pressures.p18,
       ]
 
       "#{timestamp},#{Enum.join(row, ",")}\n"
