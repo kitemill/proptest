@@ -98,7 +98,7 @@ defmodule ProbeAndVESCAgent do
       motor_current_101: -99,
       motor_current_102: -99,
       motor_current_103: -99,
-      motor_current_104: -99,
+      motor_current_104: -99
     }
 
     Agent.start_link(fn -> initial_value end, name: __MODULE__)
@@ -144,7 +144,8 @@ defmodule ProbeAndVESCAgent do
     end
   end
 
-  defp handle_can_vesc_helper_status_1(packet, vesc_id, state) when vesc_id in [101, 102, 103, 104] do
+  defp handle_can_vesc_helper_status_1(packet, vesc_id, state)
+       when vesc_id in [101, 102, 103, 104] do
     case packet.data do
       <<erpm::integer-big-32-signed, motor_current::integer-big-16-signed, _::binary>> ->
         state
@@ -160,7 +161,8 @@ defmodule ProbeAndVESCAgent do
     state
   end
 
-  defp handle_can_vesc_helper_status_4(packet, vesc_id, state) when vesc_id in [101, 102, 103, 104] do
+  defp handle_can_vesc_helper_status_4(packet, vesc_id, state)
+       when vesc_id in [101, 102, 103, 104] do
     case packet.data do
       <<_::integer-32, current::integer-big-16-signed, _::binary>> ->
         Map.put(state, String.to_atom("current_in_#{vesc_id}"), current * 0.1)
@@ -193,8 +195,16 @@ end
 
 defmodule PropTest do
   def run() do
+    # Prompt user for speed and angle
+    speed = IO.gets("Enter speed in km/h: ") |> String.trim() |> String.to_integer()
+
+    angle =
+      IO.gets("Enter heading angle in deg [+90 facing forwards, -90 facing backwards]: ")
+      |> String.trim()
+      |> String.to_integer()
+
     csv_header =
-      "epoch,force_x,force_y,force_z,p1,p2,p3,p4,p5,p6,p7,p8,temperature,erpm_101,erpm_102,erpm_103,erpm_104,current_in_101,current_in_102,current_in_103,current_in_104,motor_current_101,motor_current_102,motor_current_103,motor_current_104\n"
+      "epoch,force_x,force_y,force_z,p1,p2,p3,p4,p5,p6,p7,p8,temperature,erpm_101,erpm_102,erpm_103,erpm_104,current_in_101,current_in_102,current_in_103,current_in_104,motor_current_101,motor_current_102,motor_current_103,motor_current_104,speed,angle\n"
 
     #
     # CAN stuff to receive from the multi hole probe
@@ -228,7 +238,7 @@ defmodule PropTest do
     #     :ok
     # end
 
-    # 
+    #
     # Modbus stuff
     #
 
@@ -236,6 +246,7 @@ defmodule PropTest do
     serial_gateway_port = 502
 
     # module default, 9600 baud rate
+    # TODO: change values back to 1, 2, 3 when new amplifiers arrive!
     rtu_address_x = 3
     rtu_address_y = 3
     rtu_address_z = 3
@@ -291,7 +302,7 @@ defmodule PropTest do
         pressures.motor_current_101,
         pressures.motor_current_102,
         pressures.motor_current_103,
-        pressures.motor_current_104,
+        pressures.motor_current_104
       ]
 
       tmp =
@@ -299,6 +310,7 @@ defmodule PropTest do
         |> Enum.map(read_modbus_regs)
         |> Enum.map(regs_to_val)
         |> Enum.concat(pressure_temp_list)
+        |> Enum.concat([speed, angle])
         |> Enum.join(",")
 
       "#{timestamp},#{tmp}\n"
@@ -309,12 +321,14 @@ defmodule PropTest do
       |> DateTime.to_iso8601()
       |> String.replace(~r/[:.-]/, "_")
 
+    file_name = "proptest_logger_#{timestamp}_speed_#{speed}_angle_#{angle}.csv"
+
     add_csv_header_to_stream = fn enum -> Stream.concat([csv_header], enum) end
 
     Stream.interval(polling_interval)
     |> Stream.map(fn _ -> polling_fun.() end)
     |> add_csv_header_to_stream.()
-    |> Stream.into(File.stream!("proptest_logger_#{timestamp}.csv"))
+    |> Stream.into(File.stream!(file_name))
     |> Stream.run()
 
     # this will block
