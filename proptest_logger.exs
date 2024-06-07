@@ -178,7 +178,7 @@ defmodule ProbeAndVESCAgent do
 
   defp handle_can_packet_helper(packet, state) do
     case packet.identifier do
-      <<0x180::integer-big-16>> ->
+      <<0x190::integer-big-16>> ->
         handle_can_mhp_helper(packet, state)
 
       <<_, _, @vesc_status_1, vesc_id>> ->
