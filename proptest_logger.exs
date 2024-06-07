@@ -60,7 +60,7 @@ defmodule ProbeAndVESCAgent do
       <<0x190::integer-big-16>> ->
         case packet.data do
           <<0, p11::big-16, p12::big-16, p13::big-16, _::binary>> ->
-            %{state | p11: evoscann_raw_to_mbar(p11), p2: evoscann_raw_to_mbar(p12), p3: evoscann_raw_to_mbar(p13)}
+            %{state | p11: evoscann_raw_to_mbar(p11), p12: evoscann_raw_to_mbar(p12), p13: evoscann_raw_to_mbar(p13)}
           <<1, p14::big-16, p15::big-16, p16::big-16, t::signed>> ->
             %{state | p14: evoscann_raw_to_mbar(p14), p15: evoscann_raw_to_mbar(p15), p16: evoscann_raw_to_mbar(p16)}
           <<2, p17::big-16, p18::big-16, _::binary>> ->
