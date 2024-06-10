@@ -265,6 +265,8 @@ defmodule PropTest do
             {:rhr, node_address, modbus_address_weight_holding_registers, 2}
           )
 
+         {:error, _} ->
+           [0, 0] # this happens when motors start sometimes
         regs
       end
 
