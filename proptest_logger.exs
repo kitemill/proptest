@@ -113,8 +113,8 @@ defmodule ProbeAndVESCAgent do
   end
 
   defp evoscann_raw_to_mbar(x) do
-    <<tmp::signed-16>> = <<x - 32768::integer-16>>
-    tmp / 320.0
+    <<tmp::signed-16>> = <<(x - 32768)::integer-16>>
+    tmp / 1600.0
   end
 
   defp handle_can_mhp_helper(packet, state) do
