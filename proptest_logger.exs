@@ -130,8 +130,8 @@ defmodule PropTest do
       t = System.system_time(:millisecond)
 
 
-      servo1_sp = round(1500 + 400.0 * :math.sin(t / 1000.0 / 51.0 * 3.141 * 2))
-      servo2_sp = round(1500 + 400.0 * :math.sin(t / 1000.0 / 91.0 * 3.141 * 2))
+      servo1_sp = round(1500 + 400.0 * :math.sin(t / 1000.0 / 37.0 * 3.141 * 2))
+      servo2_sp = round(1500 + 400.0 * :math.sin(t / 1000.0 / 61.0 * 3.141 * 2))
 
       Circuits.UART.write(serial_pid,<<0xff, servo1_sp::big-16, servo2_sp::big-16>>)
       IO.puts("Setting PWM values #{servo1_sp} and #{servo2_sp}")
