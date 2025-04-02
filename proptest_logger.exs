@@ -183,7 +183,7 @@ defmodule ProbeAndVESCAgent do
 
   defp handle_can_packet_helper(packet, state) do
     case packet.identifier do
-      <<0x190::integer-big-16>> ->
+      <<0x180::integer-big-16>> ->
         handle_can_mhp_helper(packet, state)
 
       <<_, _, @vesc_status_1, vesc_id>> ->
@@ -252,9 +252,9 @@ defmodule PropTest do
 
     # module default, 9600 baud rate
     # TODO: change values back to 1, 2, 3 when new amplifiers arrive!
-    rtu_address_x = 3
-    rtu_address_y = 3
-    rtu_address_z = 3
+    rtu_address_x = 1 # +left
+    rtu_address_y = 2 # +up
+    rtu_address_z = 3 # +aft
     modbus_address_weight_holding_registers = 0x0000
 
     # ms
@@ -319,6 +319,15 @@ defmodule PropTest do
         |> Enum.concat(pressure_temp_list)
         |> Enum.concat([speed, angle])
         |> Enum.join(",")
+
+      if :rand.uniform(50) == 1 do
+
+        "p1 p2 p3 p4 p5 p6 p7 p8 temperature erpm_101 erpm_102 erpm_103 erpm_104 current_in_101 current_in_102 current_in_103 current_in_104 motor_current_101 motor_current_102 motor_current_103, motor_current_104"
+          |> Enum.zip(pressure_temp_list)
+          |> Enum.map(fn {k,v} -> "#{k}: #{v}" end)
+          |> Enum.join(", ")
+          |> IO.puts
+      end
 
       "#{timestamp},#{tmp}\n"
     end
