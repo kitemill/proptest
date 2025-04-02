@@ -15,6 +15,11 @@
 #
 # $ candump can0
 #
+# If you reconect the USB adapter you may not be able to get CAN traffic back
+# online. To reset slcand issue the command:
+#
+# $ sudo killall slcand
+#
 # To connect to the load cell amplifiers, you need to connect to a local
 # network on the same subnet as the modbus Ethernet gateway. This could be done
 # in the control panel in Linux using eg.
@@ -264,10 +269,10 @@ defmodule PropTest do
             master,
             {:rhr, node_address, modbus_address_weight_holding_registers, 2}
           )
+	        regs
 
          {:error, _} ->
            [0, 0] # this happens when motors start sometimes
-        regs
       end
 
       regs_to_val = fn [r0, r1] ->
