@@ -263,16 +263,15 @@ defmodule PropTest do
     {:ok, master} = Modbus.Master.start_link(ip: serial_gateway_ip, port: serial_gateway_port)
 
     polling_fun = fn ->
+      # FIX: use case to handle {:error, :timeout} gracefully (happens when motors start)
       read_modbus_regs = fn node_address ->
-        {:ok, regs} =
-          Modbus.Master.exec(
-            master,
-            {:rhr, node_address, modbus_address_weight_holding_registers, 2}
-          )
-	        regs
-
-         {:error, _} ->
-           [0, 0] # this happens when motors start sometimes
+        case Modbus.Master.exec(
+          master,
+          {:rhr, node_address, modbus_address_weight_holding_registers, 2}
+        ) do
+          {:ok, regs} -> regs
+          {:error, _} -> [0, 0]
+        end
       end
 
       regs_to_val = fn [r0, r1] ->
@@ -322,7 +321,8 @@ defmodule PropTest do
 
       if :rand.uniform(50) == 1 do
 
-        "p1 p2 p3 p4 p5 p6 p7 p8 temperature erpm_101 erpm_102 erpm_103 erpm_104 current_in_101 current_in_102 current_in_103 current_in_104 motor_current_101 motor_current_102 motor_current_103, motor_current_104"
+        "p1 p2 p3 p4 p5 p6 p7 p8 temperature erpm_101 erpm_102 erpm_103 erpm_104 current_in_101 current_in_102 current_in_103 current_in_104 motor_current_101 motor_current_102 motor_current_103 motor_current_104"
+          |> String.split(" ")
           |> Enum.zip(pressure_temp_list)
           |> Enum.map(fn {k,v} -> "#{k}: #{v}" end)
           |> Enum.join(", ")
