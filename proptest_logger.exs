@@ -1,7 +1,9 @@
 #
 # This script will download data from the three load sensors on the prop test
-# rig and output them to a CSV file. It will also interface the multi hole
-# probe. And also note the RPM coming from VESC with Id 101, 102, 103, 104, 105
+# rig and output them to a CSV file. It listens for ESC telemetry over CAN
+# using the TM-UAVCAN/DroneCAN protocol (EscStatus message type 1034) and
+# logs voltage, current, RPM, throttle and temperature. The multi hole probe
+# code path is kept (CAN-ID 0x180) but is not exercised in the current setup.
 #
 # To get the CANable USB adapter to connect to CAN on 250 kbps (for VESC and
 # multi hole probe) you need to issue the following commands
@@ -45,11 +47,10 @@
 #
 # ! Pro tip: type `nautilus &` to open the file explorer
 #
-# We are logging ERPM for the VESCs. The ERPM must be divided by half the
-# number of poles on the motor itself to get the actual RPM on the shaft. For
-# both the Hacker and KDE motors, this number is (28 / 2). So eg. 14000 ERPM
-# means 1000 RPM on the shaft. The maximum speed of the motors is around 5000
-# RPM [70_000 ERPM].
+# EscStatus reports actual shaft RPM directly (int18, signed), so unlike the
+# previous VESC setup no ERPM-to-RPM conversion is needed. The TM-UAVCAN
+# protocol uses 29-bit extended CAN-IDs at 1 Mbps by default; check that the
+# slcand baud rate flag (`-s`) matches the ESC's configured bus rate.
 #
 # The Modbus TCP gateway is set up with:
 # - Address 192.168.0.239
@@ -78,8 +79,7 @@ Mix.install(
 defmodule ProbeAndVESCAgent do
   use Agent
 
-  @vesc_status_1 9
-  @vesc_status_4 16
+  @esc_status_msg_type_id 1034
 
   def start_link() do
     initial_value = %{
@@ -92,18 +92,16 @@ defmodule ProbeAndVESCAgent do
       p7: 0.0,
       p8: 0.0,
       temperature: 0.0,
-      erpm_101: -99,
-      erpm_102: -99,
-      erpm_103: -99,
-      erpm_104: -99,
-      current_in_101: -99,
-      current_in_102: -99,
-      current_in_103: -99,
-      current_in_104: -99,
-      motor_current_101: -99,
-      motor_current_102: -99,
-      motor_current_103: -99,
-      motor_current_104: -99
+      esc_voltage: -99.0,
+      esc_current: -99.0,
+      esc_temperature_c: -99.0,
+      esc_rpm: -99,
+      esc_throttle: -99,
+      esc_status_bits: 0,
+      # Multi-frame reassembly buffer keyed by {source_node_id, transfer_id}.
+      # Holds the accumulated payload bytes (with tail bytes stripped) until
+      # the End-of-transfer bit is seen.
+      uavcan_buffers: %{}
     }
 
     Agent.start_link(fn -> initial_value end, name: __MODULE__)
@@ -149,36 +147,90 @@ defmodule ProbeAndVESCAgent do
     end
   end
 
-  defp handle_can_vesc_helper_status_1(packet, vesc_id, state)
-       when vesc_id in [101, 102, 103, 104] do
-    case packet.data do
-      <<erpm::integer-big-32-signed, motor_current::integer-big-16-signed, _::binary>> ->
-        state
-        |> Map.put(String.to_atom("erpm_#{vesc_id}"), erpm)
-        |> Map.put(String.to_atom("motor_current_#{vesc_id}"), motor_current * 0.1)
+  # UAVCAN/DroneCAN: tail byte is the last byte of every CAN frame and carries
+  # <<start_of_transfer::1, end_of_transfer::1, toggle::1, transfer_id::5>>.
+  # Single-frame transfers have start=1, end=1.
+  # For multi-frame, the first frame additionally has a 2-byte transfer CRC at
+  # the start of its payload (we discard it — single ESC, short bus, no CRC check).
+  defp handle_can_uavcan_esc(frame_data, source_node_id, state) do
+    payload_size = byte_size(frame_data) - 1
+    <<payload::binary-size(payload_size), tail::8>> = frame_data
+    <<sot::1, eot::1, _toggle::1, transfer_id::5>> = <<tail>>
+
+    case {sot, eot} do
+      {1, 1} ->
+        # Single-frame transfer — payload is complete.
+        parse_esc_status(payload, state)
+
+      {1, 0} ->
+        # First frame of a multi-frame transfer. Strip 2-byte transfer CRC.
+        <<_crc::binary-size(2), rest::binary>> = payload
+        key = {source_node_id, transfer_id}
+        put_in(state.uavcan_buffers[key], rest)
+
+      {0, 0} ->
+        # Middle frame — append payload.
+        key = {source_node_id, transfer_id}
+
+        case Map.fetch(state.uavcan_buffers, key) do
+          {:ok, acc} -> put_in(state.uavcan_buffers[key], acc <> payload)
+          :error -> state
+        end
+
+      {0, 1} ->
+        # Last frame — append, parse, drop buffer.
+        key = {source_node_id, transfer_id}
+
+        case Map.fetch(state.uavcan_buffers, key) do
+          {:ok, acc} ->
+            full = acc <> payload
+            state = update_in(state.uavcan_buffers, &Map.delete(&1, key))
+            parse_esc_status(full, state)
+
+          :error ->
+            state
+        end
+    end
+  end
+
+  # EscStatus(1034) — 14 bytes:
+  # uint32 status | float16 voltage | float16 current | float16 temperature_K
+  # | int18 rpm | uint7 throttle | uint5 esc_index | 2 bits padding to byte boundary
+  defp parse_esc_status(payload, state) do
+    case payload do
+      <<status::little-32, voltage_f16::little-16, current_f16::little-16,
+        temp_f16::little-16, rpm::signed-18, throttle::7, _esc_index::5,
+        _pad::2>> ->
+        %{
+          state
+          | esc_status_bits: status,
+            esc_voltage: float16_to_float(voltage_f16),
+            esc_current: float16_to_float(current_f16),
+            esc_temperature_c: float16_to_float(temp_f16) - 273.15,
+            esc_rpm: rpm,
+            esc_throttle: throttle
+        }
 
       _ ->
         state
     end
   end
 
-  defp handle_can_vesc_helper_status_1(_packet, _vesc_id, state) do
-    state
-  end
-
-  defp handle_can_vesc_helper_status_4(packet, vesc_id, state)
-       when vesc_id in [101, 102, 103, 104] do
-    case packet.data do
-      <<_::integer-32, current::integer-big-16-signed, _::binary>> ->
-        Map.put(state, String.to_atom("current_in_#{vesc_id}"), current * 0.1)
-
-      _ ->
-        state
-    end
-  end
-
-  defp handle_can_vesc_helper_status_4(_packet, _vesc_id, state) do
-    state
+  # IEEE 754 half-precision (float16) to float32. Algorithm from TM-UAVCAN
+  # appendix 5.2 (ConvertFloat16ToFloat) — re-cast bits as float32, scale by
+  # magic constant, then handle inf/nan and re-apply sign.
+  defp float16_to_float(value) do
+    import Bitwise
+    sign_bit = (value &&& 0x8000) <<< 16
+    exp_mant_u = (value &&& 0x7FFF) <<< 13
+    <<exp_mant_f::float-32>> = <<exp_mant_u::32>>
+    <<magic_f::float-32>> = <<((254 - 15) <<< 23)::32>>
+    <<inf_nan_f::float-32>> = <<((127 + 16) <<< 23)::32>>
+    scaled = exp_mant_f * magic_f
+    <<scaled_u::32>> = <<scaled::float-32>>
+    scaled_u = if scaled >= inf_nan_f, do: scaled_u ||| 255 <<< 23, else: scaled_u
+    <<f::float-32>> = <<scaled_u ||| sign_bit::32>>
+    f
   end
 
   defp handle_can_packet_helper(packet, state) do
@@ -186,11 +238,8 @@ defmodule ProbeAndVESCAgent do
       <<0x180::integer-big-16>> ->
         handle_can_mhp_helper(packet, state)
 
-      <<_, _, @vesc_status_1, vesc_id>> ->
-        handle_can_vesc_helper_status_1(packet, vesc_id, state)
-
-      <<_, _, @vesc_status_4, vesc_id>> ->
-        handle_can_vesc_helper_status_4(packet, vesc_id, state)
+      <<_::3, _priority::5, @esc_status_msg_type_id::16, _service::1, source_node_id::7>> ->
+        handle_can_uavcan_esc(packet.data, source_node_id, state)
 
       _ ->
         state
@@ -209,7 +258,7 @@ defmodule PropTest do
       |> String.to_integer()
 
     csv_header =
-      "epoch,force_x,force_y,force_z,p1,p2,p3,p4,p5,p6,p7,p8,temperature,erpm_101,erpm_102,erpm_103,erpm_104,current_in_101,current_in_102,current_in_103,current_in_104,motor_current_101,motor_current_102,motor_current_103,motor_current_104,speed,angle\n"
+      "epoch,force_x,force_y,force_z,p1,p2,p3,p4,p5,p6,p7,p8,temperature,esc_voltage,esc_current,esc_rpm,esc_throttle,esc_temperature_c,esc_status_bits,speed,angle\n"
 
     #
     # CAN stuff to receive from the multi hole probe
@@ -298,18 +347,12 @@ defmodule PropTest do
         pressures.p7,
         pressures.p8,
         pressures.temperature,
-        pressures.erpm_101,
-        pressures.erpm_102,
-        pressures.erpm_103,
-        pressures.erpm_104,
-        pressures.current_in_101,
-        pressures.current_in_102,
-        pressures.current_in_103,
-        pressures.current_in_104,
-        pressures.motor_current_101,
-        pressures.motor_current_102,
-        pressures.motor_current_103,
-        pressures.motor_current_104
+        pressures.esc_voltage,
+        pressures.esc_current,
+        pressures.esc_rpm,
+        pressures.esc_throttle,
+        pressures.esc_temperature_c,
+        pressures.esc_status_bits
       ]
 
       tmp =
@@ -321,12 +364,11 @@ defmodule PropTest do
         |> Enum.join(",")
 
       if :rand.uniform(50) == 1 do
-
-        "p1 p2 p3 p4 p5 p6 p7 p8 temperature erpm_101 erpm_102 erpm_103 erpm_104 current_in_101 current_in_102 current_in_103 current_in_104 motor_current_101 motor_current_102 motor_current_103, motor_current_104"
-          |> Enum.zip(pressure_temp_list)
-          |> Enum.map(fn {k,v} -> "#{k}: #{v}" end)
-          |> Enum.join(", ")
-          |> IO.puts
+        ~w(p1 p2 p3 p4 p5 p6 p7 p8 temperature esc_voltage esc_current esc_rpm esc_throttle esc_temperature_c esc_status_bits)
+        |> Enum.zip(pressure_temp_list)
+        |> Enum.map(fn {k, v} -> "#{k}: #{v}" end)
+        |> Enum.join(", ")
+        |> IO.puts()
       end
 
       "#{timestamp},#{tmp}\n"
