@@ -159,17 +159,14 @@ defmodule ProbeAndVESCAgent do
 
     case {sot, eot} do
       {1, 1} ->
-        # Single-frame transfer — payload is complete.
         parse_esc_status(payload, state)
 
       {1, 0} ->
-        # First frame of a multi-frame transfer. Strip 2-byte transfer CRC.
         <<_crc::binary-size(2), rest::binary>> = payload
         key = {source_node_id, transfer_id}
         put_in(state.uavcan_buffers[key], rest)
 
       {0, 0} ->
-        # Middle frame — append payload.
         key = {source_node_id, transfer_id}
 
         case Map.fetch(state.uavcan_buffers, key) do
@@ -178,12 +175,14 @@ defmodule ProbeAndVESCAgent do
         end
 
       {0, 1} ->
-        # Last frame — append, parse, drop buffer.
         key = {source_node_id, transfer_id}
 
         case Map.fetch(state.uavcan_buffers, key) do
           {:ok, acc} ->
-            full = acc <> payload
+            # SocketCAN/cannes always delivers 8-byte frames regardless of the
+            # CAN frame's actual DLC, so the last frame carries trailing padding.
+            # EscStatus is fixed at 14 bytes — trim to that.
+            full = binary_part(acc <> payload, 0, 14)
             state = update_in(state.uavcan_buffers, &Map.delete(&1, key))
             parse_esc_status(full, state)
 
@@ -193,14 +192,20 @@ defmodule ProbeAndVESCAgent do
     end
   end
 
-  # EscStatus(1034) — 14 bytes:
-  # uint32 status | float16 voltage | float16 current | float16 temperature_K
-  # | int18 rpm | uint7 throttle | uint5 esc_index | 2 bits padding to byte boundary
+  # EscStatus(1034) — 14 bytes per TM-UAVCAN v2.3.
+  # Byte 1-4   : status (uint32 LE)
+  # Byte 5-6   : voltage (float16 LE) — volts
+  # Byte 7-8   : current (float16 LE) — amperes
+  # Byte 9-10  : temperature (float16 LE) — kelvin
+  # Byte 11-12 : rpm (int16 LE) — mechanical RPM (verified against tachometer
+  #              at 680 and 1400 RPM; doc says "INT18 2~3 byte" but in practice
+  #              the value fits a signed 16-bit field)
+  # Byte 13    : throttle (uint8) — 0..100 %
+  # Byte 14    : esc_index (uint8) — 0..19, configured ESC channel
   defp parse_esc_status(payload, state) do
     case payload do
       <<status::little-32, voltage_f16::little-16, current_f16::little-16,
-        temp_f16::little-16, rpm::signed-18, throttle::7, _esc_index::5,
-        _pad::2>> ->
+        temp_f16::little-16, rpm::signed-little-16, throttle::8, _esc_index::8>> ->
         %{
           state
           | esc_status_bits: status,
