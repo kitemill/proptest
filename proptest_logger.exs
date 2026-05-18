@@ -318,15 +318,17 @@ defmodule PropTest do
 
     polling_fun = fn ->
       read_modbus_regs = fn node_address ->
-        {:ok, regs} =
-          Modbus.Master.exec(
-            master,
-            {:rhr, node_address, modbus_address_weight_holding_registers, 2}
-          )
-	        regs
+        try do
+          {:ok, regs} =
+            Modbus.Master.exec(
+              master,
+              {:rhr, node_address, modbus_address_weight_holding_registers, 2}
+            )
 
-         {:error, _} ->
-           [0, 0] # this happens when motors start sometimes
+          regs
+        rescue
+          _ -> [0, 0] # this happens when motors start sometimes
+        end
       end
 
       regs_to_val = fn [r0, r1] ->
