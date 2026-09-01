@@ -78,6 +78,7 @@ Mix.install(
 # This agent holds the data from the probe so it can be accessed asyncronically
 defmodule ProbeAndVESCAgent do
   use Agent
+  import Bitwise
 
   @esc_status_msg_type_id 1034
 
@@ -193,27 +194,38 @@ defmodule ProbeAndVESCAgent do
   end
 
   # EscStatus(1034) — 14 bytes per TM-UAVCAN v2.3.
-  # Byte 1-4   : status (uint32 LE)
-  # Byte 5-6   : voltage (float16 LE) — volts
-  # Byte 7-8   : current (float16 LE) — amperes
-  # Byte 9-10  : temperature (float16 LE) — kelvin
-  # Byte 11-12 : rpm (int16 LE) — mechanical RPM (verified against tachometer
-  #              at 680 and 1400 RPM; doc says "INT18 2~3 byte" but in practice
-  #              the value fits a signed 16-bit field)
-  # Byte 13    : throttle (uint8) — 0..100 %
-  # Byte 14    : esc_index (uint8) — 0..19, configured ESC channel
+  # Byte 1-4  : status (uint32 LE)
+  # Byte 5-6  : voltage (float16 LE) — volts
+  # Byte 7-8  : current (float16 LE) — amperes
+  # Byte 9-10 : temperature (float16 LE) — kelvin
+  #
+  # The remaining fields are int18 rpm, uint7 power_rating_pct and uint5
+  # esc_index. That is 30 bits, so they are bit-packed LSB-first and do NOT sit
+  # on byte boundaries:
+  #
+  #   byte 11: rpm bits 0-7
+  #   byte 12: rpm bits 8-15
+  #   byte 13: rpm bits 16-17, then throttle bits 0-5
+  #   byte 14: throttle bit 6, then esc_index bits 0-4
+  #
+  # Reading byte 11-12 as a plain int16 happens to give the right rpm for
+  # positive values below 32768, which is why it looked correct — but throttle
+  # spans two bytes and read as zero. Unpack the bits explicitly instead.
   defp parse_esc_status(payload, state) do
     case payload do
       <<status::little-32, voltage_f16::little-16, current_f16::little-16,
-        temp_f16::little-16, rpm::signed-little-16, throttle::8, _esc_index::8>> ->
+        temp_f16::little-16, b11::8, b12::8, b13::8, b14::8>> ->
+        rpm_raw = b11 ||| (b12 <<< 8) ||| ((b13 &&& 0x03) <<< 16)
+
         %{
           state
           | esc_status_bits: status,
             esc_voltage: float16_to_float(voltage_f16),
             esc_current: float16_to_float(current_f16),
             esc_temperature_c: float16_to_float(temp_f16) - 273.15,
-            esc_rpm: rpm,
-            esc_throttle: throttle
+            # int18 two's complement
+            esc_rpm: if(rpm_raw >= 0x20000, do: rpm_raw - 0x40000, else: rpm_raw),
+            esc_throttle: ((b13 >>> 2) &&& 0x3F) ||| ((b14 &&& 0x01) <<< 6)
         }
 
       _ ->
@@ -225,7 +237,6 @@ defmodule ProbeAndVESCAgent do
   # appendix 5.2 (ConvertFloat16ToFloat) — re-cast bits as float32, scale by
   # magic constant, then handle inf/nan and re-apply sign.
   defp float16_to_float(value) do
-    import Bitwise
     sign_bit = (value &&& 0x8000) <<< 16
     exp_mant_u = (value &&& 0x7FFF) <<< 13
     <<exp_mant_f::float-32>> = <<exp_mant_u::32>>
