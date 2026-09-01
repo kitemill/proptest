@@ -99,6 +99,8 @@ defmodule ProbeAndVESCAgent do
       esc_rpm: -99,
       esc_throttle: -99,
       esc_status_bits: 0,
+      # Last raw EscStatus payload as hex, for debugging the field layout.
+      esc_raw: "",
       # Multi-frame reassembly buffer keyed by {source_node_id, transfer_id}.
       # Holds the accumulated payload bytes (with tail bytes stripped) until
       # the End-of-transfer bit is seen.
@@ -225,7 +227,8 @@ defmodule ProbeAndVESCAgent do
             esc_temperature_c: float16_to_float(temp_f16) - 273.15,
             # int18 two's complement
             esc_rpm: if(rpm_raw >= 0x20000, do: rpm_raw - 0x40000, else: rpm_raw),
-            esc_throttle: ((b13 >>> 2) &&& 0x3F) ||| ((b14 &&& 0x01) <<< 6)
+            esc_throttle: ((b13 >>> 2) &&& 0x3F) ||| ((b14 &&& 0x01) <<< 6),
+            esc_raw: Base.encode16(payload)
         }
 
       _ ->
@@ -381,12 +384,15 @@ defmodule PropTest do
         |> Enum.concat([speed, angle])
         |> Enum.join(",")
 
-      if :rand.uniform(50) == 1 do
+      # polling_interval is 250 ms, so 1-in-20 averages one printout per 5 s
+      if :rand.uniform(20) == 1 do
         ~w(p1 p2 p3 p4 p5 p6 p7 p8 temperature esc_voltage esc_current esc_rpm esc_throttle esc_temperature_c esc_status_bits)
         |> Enum.zip(pressure_temp_list)
         |> Enum.map(fn {k, v} -> "#{k}: #{v}" end)
         |> Enum.join(", ")
         |> IO.puts()
+
+        IO.puts("  raw EscStatus: #{pressures.esc_raw}")
       end
 
       "#{timestamp},#{tmp}\n"
