@@ -81,6 +81,7 @@ defmodule ProbeAndVESCAgent do
   import Bitwise
 
   @esc_status_msg_type_id 1034
+  @esc_raw_command_msg_type_id 1030
 
   def start_link() do
     initial_value = %{
@@ -99,6 +100,9 @@ defmodule ProbeAndVESCAgent do
       esc_rpm: -99,
       esc_throttle: -99,
       esc_status_bits: 0,
+      # Commanded throttle from RawCommand(1030), channel 0. The ESC reports
+      # esc_index 0, so channel 0 is the one driving it.
+      cmd_throttle: -99,
       # Last raw EscStatus payload as hex, for debugging the field layout.
       esc_raw: "",
       # Multi-frame reassembly buffer keyed by {source_node_id, transfer_id}.
@@ -155,45 +159,65 @@ defmodule ProbeAndVESCAgent do
   # Single-frame transfers have start=1, end=1.
   # For multi-frame, the first frame additionally has a 2-byte transfer CRC at
   # the start of its payload (we discard it — single ESC, short bus, no CRC check).
-  defp handle_can_uavcan_esc(frame_data, source_node_id, state) do
+  defp handle_can_uavcan(frame_data, msg_type, source_node_id, state) do
     payload_size = byte_size(frame_data) - 1
     <<payload::binary-size(payload_size), tail::8>> = frame_data
     <<sot::1, eot::1, _toggle::1, transfer_id::5>> = <<tail>>
+    key = {source_node_id, msg_type, transfer_id}
 
     case {sot, eot} do
       {1, 1} ->
-        parse_esc_status(payload, state)
+        parse_payload(msg_type, payload, state)
 
       {1, 0} ->
         <<_crc::binary-size(2), rest::binary>> = payload
-        key = {source_node_id, transfer_id}
         put_in(state.uavcan_buffers[key], rest)
 
       {0, 0} ->
-        key = {source_node_id, transfer_id}
-
         case Map.fetch(state.uavcan_buffers, key) do
           {:ok, acc} -> put_in(state.uavcan_buffers[key], acc <> payload)
           :error -> state
         end
 
       {0, 1} ->
-        key = {source_node_id, transfer_id}
-
         case Map.fetch(state.uavcan_buffers, key) do
           {:ok, acc} ->
             # SocketCAN/cannes always delivers 8-byte frames regardless of the
             # CAN frame's actual DLC, so the last frame carries trailing padding.
-            # EscStatus is fixed at 14 bytes — trim to that.
-            full = binary_part(acc <> payload, 0, 14)
+            # EscStatus and the 8-channel RawCommand are both 14 bytes — trim to
+            # that, but never past the end of what we actually collected.
+            combined = acc <> payload
+            full = binary_part(combined, 0, min(byte_size(combined), 14))
             state = update_in(state.uavcan_buffers, &Map.delete(&1, key))
-            parse_esc_status(full, state)
+            parse_payload(msg_type, full, state)
 
           :error ->
             state
         end
     end
   end
+
+  defp parse_payload(@esc_status_msg_type_id, payload, state),
+    do: parse_esc_status(payload, state)
+
+  defp parse_payload(@esc_raw_command_msg_type_id, payload, state),
+    do: parse_raw_command(payload, state)
+
+  # RawCommand(1030) — int14[<=20] cmd. As the last field the array gets DSDL
+  # tail array optimisation: no length prefix, the channel count follows from
+  # the payload length (14 bytes = 112 bits = 8 channels).
+  #
+  # Fields are bit-packed LSB-first, the same convention as the rpm field in
+  # EscStatus, so channel 0 is the low 14 bits of the first two bytes read
+  # little-endian. Range is -8192..8191, where 8191 is full forward throttle.
+  defp parse_raw_command(payload, state) when byte_size(payload) >= 2 do
+    <<first::little-16, _rest::binary>> = payload
+    raw = first &&& 0x3FFF
+
+    %{state | cmd_throttle: if(raw >= 0x2000, do: raw - 0x4000, else: raw)}
+  end
+
+  defp parse_raw_command(_payload, state), do: state
 
   # EscStatus(1034) — 14 bytes per TM-UAVCAN v2.3.
   # Byte 1-4  : status (uint32 LE)
@@ -258,7 +282,10 @@ defmodule ProbeAndVESCAgent do
         handle_can_mhp_helper(packet, state)
 
       <<_::3, _priority::5, @esc_status_msg_type_id::16, _service::1, source_node_id::7>> ->
-        handle_can_uavcan_esc(packet.data, source_node_id, state)
+        handle_can_uavcan(packet.data, @esc_status_msg_type_id, source_node_id, state)
+
+      <<_::3, _priority::5, @esc_raw_command_msg_type_id::16, _service::1, source_node_id::7>> ->
+        handle_can_uavcan(packet.data, @esc_raw_command_msg_type_id, source_node_id, state)
 
       _ ->
         state
@@ -277,7 +304,7 @@ defmodule PropTest do
       |> String.to_integer()
 
     csv_header =
-      "epoch,force_x,force_y,force_z,p1,p2,p3,p4,p5,p6,p7,p8,temperature,esc_voltage,esc_current,esc_rpm,esc_throttle,esc_temperature_c,esc_status_bits,speed,angle\n"
+      "epoch,force_x,force_y,force_z,p1,p2,p3,p4,p5,p6,p7,p8,temperature,esc_voltage,esc_current,esc_rpm,esc_throttle,cmd_throttle,esc_temperature_c,esc_status_bits,speed,angle\n"
 
     #
     # CAN stuff to receive from the multi hole probe
@@ -372,6 +399,7 @@ defmodule PropTest do
         pressures.esc_current,
         pressures.esc_rpm,
         pressures.esc_throttle,
+        pressures.cmd_throttle,
         pressures.esc_temperature_c,
         pressures.esc_status_bits
       ]
@@ -386,7 +414,7 @@ defmodule PropTest do
 
       # polling_interval is 250 ms, so 1-in-20 averages one printout per 5 s
       if :rand.uniform(20) == 1 do
-        ~w(p1 p2 p3 p4 p5 p6 p7 p8 temperature esc_voltage esc_current esc_rpm esc_throttle esc_temperature_c esc_status_bits)
+        ~w(p1 p2 p3 p4 p5 p6 p7 p8 temperature esc_voltage esc_current esc_rpm esc_throttle cmd_throttle esc_temperature_c esc_status_bits)
         |> Enum.zip(pressure_temp_list)
         |> Enum.map(fn {k, v} -> "#{k}: #{v}" end)
         |> Enum.join(", ")
