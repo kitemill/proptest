@@ -102,7 +102,7 @@ defmodule ProbeAndVESCAgent do
       esc_status_bits: 0,
       # Commanded throttle from RawCommand(1030), channel 0. The ESC reports
       # esc_index 0, so channel 0 is the one driving it.
-      cmd_throttle: -99,
+      cmd_throttle_pct: -99.0,
       # Last raw EscStatus payload as hex, for debugging the field layout.
       esc_raw: "",
       # Multi-frame reassembly buffer keyed by {source_node_id, transfer_id}.
@@ -218,8 +218,11 @@ defmodule ProbeAndVESCAgent do
   defp parse_raw_command(payload, state) when byte_size(payload) >= 2 do
     <<lo::8, hi::6, _::bitstring>> = payload
     raw = (hi <<< 8) ||| lo
+    signed = if raw >= 0x2000, do: raw - 0x4000, else: raw
 
-    %{state | cmd_throttle: if(raw >= 0x2000, do: raw - 0x4000, else: raw)}
+    # Logged as percent rather than raw counts. Two decimals is just enough to
+    # keep the command's own resolution, which is 100/8191 = 0.012 %.
+    %{state | cmd_throttle_pct: Float.round(signed * 100 / 8191, 2)}
   end
 
   defp parse_raw_command(_payload, state), do: state
@@ -309,7 +312,7 @@ defmodule PropTest do
       |> String.to_integer()
 
     csv_header =
-      "epoch,force_x,force_y,force_z,p1,p2,p3,p4,p5,p6,p7,p8,temperature,esc_voltage,esc_current,esc_rpm,esc_throttle,cmd_throttle,esc_temperature_c,esc_status_bits,speed,angle\n"
+      "epoch,force_x,force_y,force_z,p1,p2,p3,p4,p5,p6,p7,p8,temperature,esc_voltage,esc_current,esc_rpm,esc_throttle,cmd_throttle_pct,esc_temperature_c,esc_status_bits,speed,angle\n"
 
     #
     # CAN stuff to receive from the multi hole probe
@@ -404,7 +407,7 @@ defmodule PropTest do
         pressures.esc_current,
         pressures.esc_rpm,
         pressures.esc_throttle,
-        pressures.cmd_throttle,
+        pressures.cmd_throttle_pct,
         pressures.esc_temperature_c,
         pressures.esc_status_bits
       ]
@@ -419,7 +422,7 @@ defmodule PropTest do
 
       # polling_interval is 250 ms, so 1-in-20 averages one printout per 5 s
       if :rand.uniform(20) == 1 do
-        ~w(p1 p2 p3 p4 p5 p6 p7 p8 temperature esc_voltage esc_current esc_rpm esc_throttle cmd_throttle esc_temperature_c esc_status_bits)
+        ~w(p1 p2 p3 p4 p5 p6 p7 p8 temperature esc_voltage esc_current esc_rpm esc_throttle cmd_throttle_pct esc_temperature_c esc_status_bits)
         |> Enum.zip(pressure_temp_list)
         |> Enum.map(fn {k, v} -> "#{k}: #{v}" end)
         |> Enum.join(", ")
