@@ -203,16 +203,21 @@ defmodule ProbeAndVESCAgent do
   defp parse_payload(@esc_raw_command_msg_type_id, payload, state),
     do: parse_raw_command(payload, state)
 
-  # RawCommand(1030) — int14[<=20] cmd. As the last field the array gets DSDL
-  # tail array optimisation: no length prefix, the channel count follows from
-  # the payload length (14 bytes = 112 bits = 8 channels).
+  # RawCommand(1030) — 14*N bits of throttle data, one channel per axis in
+  # order, padded to a byte boundary. No length prefix.
   #
-  # Fields are bit-packed LSB-first, the same convention as the rpm field in
-  # EscStatus, so channel 0 is the low 14 bits of the first two bytes read
-  # little-endian. Range is -8192..8191, where 8191 is full forward throttle.
+  # The packing is NOT a plain int14. Per the vendor's worked example, each
+  # channel is serialised as the low byte of the 16-bit value, followed by the
+  # low 6 bits of its high byte, concatenated MSB-first:
+  #
+  #   1000 (0x03E8) to four channels  ->  E8 0F A0 3E 80 FA 03
+  #
+  # So channel 0 is the first whole byte (value bits 0-7) followed by the next
+  # 6 bits (value bits 8-13). Range is 0..8191 for zero to full throttle; bit
+  # 13 is a sign bit, but the ESC treats negative values as a throttle error.
   defp parse_raw_command(payload, state) when byte_size(payload) >= 2 do
-    <<first::little-16, _rest::binary>> = payload
-    raw = first &&& 0x3FFF
+    <<lo::8, hi::6, _::bitstring>> = payload
+    raw = (hi <<< 8) ||| lo
 
     %{state | cmd_throttle: if(raw >= 0x2000, do: raw - 0x4000, else: raw)}
   end
